@@ -25,7 +25,6 @@ app.get('/api/kbank-expenses', async (req, res) => {
   }
 
   try {
-    // ค้นหาอีเมล KBank ย้อนหลัง 30 วันแบบกว้าง
     const response = await gmail.users.messages.list({
       userId: 'me',
       q: 'from:kasikornbank.com newer_than:30d',
@@ -54,20 +53,26 @@ app.get('/api/kbank-expenses', async (req, res) => {
       const subject = headers.find(h => h.name === 'Subject')?.value || '';
       const dateStr = headers.find(h => h.name === 'Date')?.value || '';
       
-      // ดึงตัวเลขเงินบาทแบบครอบคลุม
-      const amountMatch = text.match(/([\d,]+\.\d{2})\s*(?:บาท|THB)/i) || text.match(/(?:จำนวนเงิน|จำนวน)\s*[:]?\s*([\d,]+\.\d{2})/);
+      // 1. แกะยอดเงิน (รองรับทั้ง Amount, Amount/จำนวนเงิน, THB, บาท)
+      const amountMatch = text.match(/(?:Amount|จำนวนเงิน|จำนวน)\s*[:]?\s*([\d,]+\.\d{2})/i) || 
+                          text.match(/([\d,]+\.\d{2})\s*(?:THB|บาท)/i);
       const amount = amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0;
       
-      const isIncome = subject.includes('เงินเข้า') || text.includes('รับเงิน');
+      // 2. เช็คว่าเป็น รายรับ หรือ รายจ่าย
+      const isIncome = text.toLowerCase().includes('received') || 
+                       text.includes('รับเงิน') || 
+                       subject.toLowerCase().includes('received');
       
-      let payee = "KBank Transaction";
-      const payeeMatch = text.match(/(?:ไปยังบัญชี|ให้กับ|ชื่อผู้รับ|จาก)\s*(.+?)(\r|\n|<)/);
+      // 3. แกะชื่อผู้รับ/ผู้โอน (To/From/ไปยัง/จาก)
+      let payee = "KBank Transfer";
+      const payeeMatch = text.match(/(?:To|From|ไปยังบัญชี|ให้กับ|ชื่อผู้รับ|จาก)\s*[:]?\s*(.+?)(\r|\n|<)/i);
       if (payeeMatch) payee = payeeMatch[1].trim();
 
+      // 4. หมวดหมู่อัตโนมัติ
       let category = 'other';
       const p = payee.toLowerCase();
       if (p.includes('7-eleven') || p.includes('cp all') || p.includes('grab') || p.includes('food')) category = 'food';
-      else if (p.includes('bts') || p.includes('mrt') || p.includes('ปตท') || p.includes('ptt')) category = 'transport';
+      else if (p.includes('bts') || p.includes('mrt') || p.includes('ptt') || p.includes('bolt')) category = 'transport';
 
       transactions.push({
         id: msg.id,
