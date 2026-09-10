@@ -17,6 +17,20 @@ if (process.env.GMAIL_REFRESH_TOKEN) {
 
 const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
+// ฟังก์ชันช่วยดึง Text ทั้งหมดจาก Payload ของ Gmail
+function getEmailBody(payload) {
+  let body = '';
+  if (payload.body && payload.body.data) {
+    body += Buffer.from(payload.body.data, 'base64').toString('utf-8');
+  }
+  if (payload.parts) {
+    for (const part of payload.parts) {
+      body += getEmailBody(part);
+    }
+  }
+  return body;
+}
+
 app.get('/api/kbank-expenses', async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   
@@ -35,40 +49,38 @@ app.get('/api/kbank-expenses', async (req, res) => {
     const transactions = [];
 
     for (const msg of messages) {
-      const mail = await gmail.users.messages.get({ userId: 'me', id: msg.id });
+      const mail = await gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'full' });
       const payload = mail.data.payload;
       
-      let bodyData = '';
-      if (payload.parts) {
-        const part = payload.parts.find(p => p.mimeType === 'text/plain' || p.mimeType === 'text/html');
-        if (part && part.body && part.body.data) bodyData = part.body.data;
-      } else if (payload.body && payload.body.data) {
-        bodyData = payload.body.data;
-      }
-      if (!bodyData) continue;
-      
-      const text = Buffer.from(bodyData, 'base64').toString('utf-8');
-      
+      // ดึงข้อความทั้งหมดและลบ HTML Tags ออกให้เหลือ Text เพียวๆ
+      const rawBody = getEmailBody(payload);
+      const text = rawBody.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
+
       const headers = payload.headers;
       const subject = headers.find(h => h.name === 'Subject')?.value || '';
       const dateStr = headers.find(h => h.name === 'Date')?.value || '';
-      
-      // 1. แกะยอดเงิน (รองรับทั้ง Amount, Amount/จำนวนเงิน, THB, บาท)
-      const amountMatch = text.match(/(?:Amount|จำนวนเงิน|จำนวน)\s*[:]?\s*([\d,]+\.\d{2})/i) || 
-                          text.match(/([\d,]+\.\d{2})\s*(?:THB|บาท)/i);
-      const amount = amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0;
-      
-      // 2. เช็คว่าเป็น รายรับ หรือ รายจ่าย
-      const isIncome = text.toLowerCase().includes('received') || 
-                       text.includes('รับเงิน') || 
-                       subject.toLowerCase().includes('received');
-      
-      // 3. แกะชื่อผู้รับ/ผู้โอน (To/From/ไปยัง/จาก)
-      let payee = "KBank Transfer";
-      const payeeMatch = text.match(/(?:To|From|ไปยังบัญชี|ให้กับ|ชื่อผู้รับ|จาก)\s*[:]?\s*(.+?)(\r|\n|<)/i);
-      if (payeeMatch) payee = payeeMatch[1].trim();
 
-      // 4. หมวดหมู่อัตโนมัติ
+      // 1. ดึงยอดเงิน (Amount)
+      const amountMatch = text.match(/(?:Amount|จำนวนเงิน|จำนวน)\s*[:]?\s*([\d,]+\.\d{2})/i) ||
+                          text.match(/([\d,]+\.\d{2})\s*(?:THB|บาท)/i) ||
+                          text.match(/THB\s*([\d,]+\.\d{2})/i);
+      
+      const amount = amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0;
+
+      // 2. แยกประเภท รายรับ / รายจ่าย
+      const isIncome = subject.toLowerCase().includes('received') || 
+                       text.toLowerCase().includes('received') || 
+                       text.includes('เงินเข้า') || 
+                       text.includes('รับเงิน');
+
+      // 3. ดึงชื่อผู้รับ / รายการ
+      let payee = "KBank Transaction";
+      const payeeMatch = text.match(/(?:To|From|ไปยัง|ให้กับ|ชื่อผู้รับ|จาก|Merchant)\s*[:]?\s*(.+?)(?:\s{2,}|Amount|จำนวนเงิน|Date|วันที่|$)/i);
+      if (payeeMatch) {
+        payee = payeeMatch[1].trim();
+      }
+
+      // 4. จัดหมวดหมู่
       let category = 'other';
       const p = payee.toLowerCase();
       if (p.includes('7-eleven') || p.includes('cp all') || p.includes('grab') || p.includes('food')) category = 'food';
