@@ -38,10 +38,11 @@ app.get('/api/kbank-expenses', async (req, res) => {
   }
 
   try {
+    // 1. เพิ่มจาก 20 เป็น 50 รายการ ป้องกันรายการตกหล่น
     const response = await gmail.users.messages.list({
       userId: 'me',
       q: 'from:kasikornbank.com newer_than:30d',
-      maxResults: 20
+      maxResults: 50
     });
 
     const messages = response.data.messages || [];
@@ -58,26 +59,40 @@ app.get('/api/kbank-expenses', async (req, res) => {
       const subject = headers.find(h => h.name === 'Subject')?.value || '';
       const dateStr = headers.find(h => h.name === 'Date')?.value || '';
 
-      // 1. ดึงยอดเงิน (Amount) - ปรับ Regex ครอบคลุมรูปแบบ KBank ไทย/อังกฤษ ทุกเวอร์ชัน
+      // 2. ดึงยอดเงิน (Amount)
       const amountMatch = text.match(/(?:จำนวนเงิน|จำนวน|Amount)\s*(?:\(บาท\)|\(THB\))?\s*[:]?\s*([\d,]+\.\d{2})/i) ||
                           text.match(/([\d,]+\.\d{2})\s*(?:บาท|THB)/i) ||
                           text.match(/(?:THB|บาท)\s*([\d,]+\.\d{2})/i);
       
       const amount = amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0;
 
-      // 2. แยกประเภท รายรับ / รายจ่าย
+      // 3. แยกประเภท รายรับ / รายจ่าย
       const isIncome = text.includes('เงินเข้า') || 
                        text.includes('รับเงิน') || 
                        text.toLowerCase().includes('received');
 
-      // 3. ดึงชื่อผู้รับ / รายการ
+      // 4. แกะชื่อผู้รับ (Clean Payee Name - ตัดเลขบัญชีทิ้ง เอาเฉพาะชื่อเพียวๆ)
       let payee = "KBank Transaction";
-      const payeeMatch = text.match(/(?:ไปยังบัญชี|ไปยัง|ให้กับ|ชื่อผู้รับ|จาก|To|From|Merchant)\s*[:]?\s*(.+?)(?:\s{2,}|จำนวน|Amount|Date|วันที่|รหัสอ้างอิง|$)/i);
-      if (payeeMatch) {
-        payee = payeeMatch[1].trim();
+      
+      // ดักจับชื่อคนหลังจากคำว่า "ชื่อผู้รับเงิน:" หรือ "ชื่อผู้รับ:" หรือ "ให้กับ:"
+      const cleanNameMatch = text.match(/(?:ชื่อผู้รับเงิน|ชื่อผู้รับ|ให้กับ|โอนให้|Merchant)\s*[:]?\s*([^\s\d][^0-9\n\r<]{2,30})/i);
+      const generalMatch = text.match(/(?:ไปยังบัญชี|ไปยัง|จาก|To|From)\s*[:]?\s*(.+?)(?:\s{2,}|จำนวน|Amount|Date|วันที่|รหัสอ้างอิง|$)/i);
+
+      if (cleanNameMatch && cleanNameMatch[1]) {
+        payee = cleanNameMatch[1].trim();
+      } else if (generalMatch && generalMatch[1]) {
+        // คลีนคำสั่งขยะประเภท บัญชี: xxx-x-xxxx-x ทิ้งไป
+        payee = generalMatch[1]
+          .replace(/บัญชี:\s*xxx-x-x\d+-x/gi, '')
+          .replace(/ให้รหัสพร้อมเพย์:\s*xxx-xxx-\d+/gi, '')
+          .replace(/เพื่อเข้าบัญชีบริษัท:\s*/gi, '')
+          .replace(/ธนาคารผู้รับเงิน:\s*.+?/gi, '')
+          .trim();
       }
 
-      // 4. จัดหมวดหมู่อัตโนมัติ (Smart Categorization)
+      if (!payee || payee.length < 2) payee = "โอนเงิน / ชำระเงิน";
+
+      // 5. จัดหมวดหมู่
       let category = 'other';
       const p = payee.toLowerCase();
       if (p.includes('7-eleven') || p.includes('cp all') || p.includes('grab') || p.includes('food') || p.includes('shopee')) {
