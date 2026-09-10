@@ -1,0 +1,16 @@
+{
+  "name": "kronos-project",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "start": "node proxy.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "cors-anywhere": "^0.4.4"
+  }
+}
