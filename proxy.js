@@ -33,10 +33,10 @@ app.get('/api/kbank-expenses', async (req, res) => {
   }
 
   try {
-    // ค้นหาอีเมล KBank ย้อนหลัง 7 วัน
+    // ปรับ query ให้กว้างขึ้น และขยายเวลาเป็น 30 วัน
     const response = await gmail.users.messages.list({
       userId: 'me',
-      q: 'from:info@kasikornbank.com OR from:kbank_info@kasikornbank.com newer_than:7d (โอนเงิน OR ชำระเงิน OR เงินเข้า)',
+      q: 'from:kasikornbank.com newer_than:30d',
       maxResults: 20
     });
 
