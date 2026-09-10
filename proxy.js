@@ -17,7 +17,6 @@ if (process.env.GMAIL_REFRESH_TOKEN) {
 
 const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
 
-// ฟังก์ชันช่วยดึง Text ทั้งหมดจาก Payload ของ Gmail
 function getEmailBody(payload) {
   let body = '';
   if (payload.body && payload.body.data) {
@@ -52,7 +51,6 @@ app.get('/api/kbank-expenses', async (req, res) => {
       const mail = await gmail.users.messages.get({ userId: 'me', id: msg.id, format: 'full' });
       const payload = mail.data.payload;
       
-      // ดึงข้อความทั้งหมดและลบ HTML Tags ออกให้เหลือ Text เพียวๆ
       const rawBody = getEmailBody(payload);
       const text = rawBody.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ');
 
@@ -60,31 +58,35 @@ app.get('/api/kbank-expenses', async (req, res) => {
       const subject = headers.find(h => h.name === 'Subject')?.value || '';
       const dateStr = headers.find(h => h.name === 'Date')?.value || '';
 
-      // 1. ดึงยอดเงิน (Amount)
-      const amountMatch = text.match(/(?:Amount|จำนวนเงิน|จำนวน)\s*[:]?\s*([\d,]+\.\d{2})/i) ||
-                          text.match(/([\d,]+\.\d{2})\s*(?:THB|บาท)/i) ||
-                          text.match(/THB\s*([\d,]+\.\d{2})/i);
+      // 1. ดึงยอดเงิน (Amount) - ปรับ Regex ครอบคลุมรูปแบบ KBank ไทย/อังกฤษ ทุกเวอร์ชัน
+      const amountMatch = text.match(/(?:จำนวนเงิน|จำนวน|Amount)\s*(?:\(บาท\)|\(THB\))?\s*[:]?\s*([\d,]+\.\d{2})/i) ||
+                          text.match(/([\d,]+\.\d{2})\s*(?:บาท|THB)/i) ||
+                          text.match(/(?:THB|บาท)\s*([\d,]+\.\d{2})/i);
       
       const amount = amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0;
 
       // 2. แยกประเภท รายรับ / รายจ่าย
-      const isIncome = subject.toLowerCase().includes('received') || 
-                       text.toLowerCase().includes('received') || 
-                       text.includes('เงินเข้า') || 
-                       text.includes('รับเงิน');
+      const isIncome = text.includes('เงินเข้า') || 
+                       text.includes('รับเงิน') || 
+                       text.toLowerCase().includes('received');
 
       // 3. ดึงชื่อผู้รับ / รายการ
       let payee = "KBank Transaction";
-      const payeeMatch = text.match(/(?:To|From|ไปยัง|ให้กับ|ชื่อผู้รับ|จาก|Merchant)\s*[:]?\s*(.+?)(?:\s{2,}|Amount|จำนวนเงิน|Date|วันที่|$)/i);
+      const payeeMatch = text.match(/(?:ไปยังบัญชี|ไปยัง|ให้กับ|ชื่อผู้รับ|จาก|To|From|Merchant)\s*[:]?\s*(.+?)(?:\s{2,}|จำนวน|Amount|Date|วันที่|รหัสอ้างอิง|$)/i);
       if (payeeMatch) {
         payee = payeeMatch[1].trim();
       }
 
-      // 4. จัดหมวดหมู่
+      // 4. จัดหมวดหมู่อัตโนมัติ (Smart Categorization)
       let category = 'other';
       const p = payee.toLowerCase();
-      if (p.includes('7-eleven') || p.includes('cp all') || p.includes('grab') || p.includes('food')) category = 'food';
-      else if (p.includes('bts') || p.includes('mrt') || p.includes('ptt') || p.includes('bolt')) category = 'transport';
+      if (p.includes('7-eleven') || p.includes('cp all') || p.includes('grab') || p.includes('food') || p.includes('shopee')) {
+        category = 'shopping';
+      } else if (p.includes('bts') || p.includes('mrt') || p.includes('ptt') || p.includes('bolt')) {
+        category = 'transport';
+      } else if (p.includes('true') || p.includes('ais') || p.includes('dtac') || p.includes('urban music')) {
+        category = 'entertainment';
+      }
 
       transactions.push({
         id: msg.id,
