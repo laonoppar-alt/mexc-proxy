@@ -225,8 +225,28 @@ app.get('/api/dime-orders', async (req, res) => {
   }
 
   try {
-    const afterDate = process.env.DIME_EMAIL_AFTER;
-    const query = `from:no-reply@dime.co.th has:attachment filename:pdf${afterDate ? ` after:${afterDate}` : ''}`;
+    const fullSync = req.query.full === '1';
+    const afterMs = Number(req.query.after);
+    const initialSyncDays = Math.max(1, Number(process.env.DIME_INITIAL_SYNC_DAYS || 30));
+    const baseQuery = 'from:no-reply@dime.co.th has:attachment filename:pdf';
+    let query = baseQuery;
+
+    if (!fullSync) {
+      if (Number.isFinite(afterMs) && afterMs > 0) {
+        // Gmail search is date-based. Re-read the previous day to avoid missing
+        // messages around the last-sync boundary; the client deduplicates them.
+        const afterDate = new Date(Math.max(0, afterMs - 24 * 60 * 60 * 1000))
+          .toISOString()
+          .slice(0, 10)
+          .replace(/-/g, '/');
+        query += ` after:${afterDate}`;
+      } else if (process.env.DIME_EMAIL_AFTER) {
+        query += ` after:${process.env.DIME_EMAIL_AFTER}`;
+      } else {
+        query += ` newer_than:${initialSyncDays}d`;
+      }
+    }
+
     const messages = await listAllGmailMessages(query);
     const orders = [];
     const documents = [];
@@ -276,7 +296,15 @@ app.get('/api/dime-orders', async (req, res) => {
       }
     }
 
-    return res.json({ success: true, count: orders.length, data: orders, documents, unparsed });
+    return res.json({
+      success: true,
+      count: orders.length,
+      data: orders,
+      documents,
+      unparsed,
+      syncedAt: Date.now(),
+      fullSync
+    });
   } catch (error) {
     console.error('Dime Gmail/PDF Error:', error);
     return res.status(500).json({ success: false, error: error.message });
