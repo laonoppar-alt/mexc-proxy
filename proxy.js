@@ -178,6 +178,22 @@ function parseKPlusNotification(body) {
   };
 }
 
+function parseKbankTransactionDate(text, fallbackDate) {
+  const match = String(text || '').match(/(?:วันที่ทำรายการ|วันเวลาทำรายการ|transaction\s*date)\s*[:：]?\s*(\d{1,2}\/\d{1,2}\/\d{4})\s+(\d{1,2}:\d{2}(?::\d{2})?)/i);
+  if (match) {
+    const [day, month, rawYear] = match[1].split('/').map(Number);
+    const year = rawYear > 2400 ? rawYear - 543 : rawYear;
+    const time = match[2].split(':').map(Number);
+    const hour = time[0] || 0;
+    const minute = time[1] || 0;
+    const second = time[2] || 0;
+    const iso = `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}+07:00`;
+    const parsed = new Date(iso).getTime();
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return new Date(fallbackDate).getTime() || Date.now();
+}
+
 function decodeBase64Url(value) {
   if (!value) return Buffer.alloc(0);
   return Buffer.from(value.replace(/-/g, '+').replace(/_/g, '/'), 'base64');
@@ -448,17 +464,19 @@ app.get('/api/kbank-expenses', async (req, res) => {
       // ในอีเมล KBank มักมีคำว่า "เงินเข้า" อยู่ในส่วนคำอธิบายบัญชี
       // จึงห้ามตัดสินจากคำนี้คำเดียว ไม่อย่างนั้น "โอนเงินออก" จะกลายเป็นรายรับ
       const directionText = `${subject} ${text}`.replace(/\s+/g, ' ').toLowerCase();
-      const outgoingSignal = /โอน\s*เงิน\s*ออก|รายการ\s*โอน\s*ออก|เงิน\s*ออก|ตัด\s*บัญชี|ชำระ|จ่าย|ถอน|โอนออก|payment|debit|outgoing|withdraw/.test(directionText);
+      const outgoingSignal = /โอน\s*เงิน\s*ออก|รายการ\s*โอน\s*ออก|โอน\s*เงิน\s*จาก\s*บัญชี|โอน\s*จาก\s*บัญชี|โอน\s*ไปยังบัญชี|โอน\s*ไปยัง|โอน\s*เงิน\s*ไป|โอน\s*เงิน\s*ให้|เงิน\s*ออก|ตัด\s*บัญชี|ชำระ|จ่าย|ถอน|โอนออก|payment|debit|outgoing|withdraw|transfer\s+to/.test(directionText);
       const incomingSignal = /โอน\s*เงิน\s*เข้า|รายการ\s*โอน\s*เข้า|เงิน\s*เข้า\s*บัญชี|รับ\s*โอน|ได้รับเงิน|ฝาก|received|credit|incoming/.test(directionText);
       const isIncome = incomingSignal && !outgoingSignal;
       const transactionType = isIncome ? 'income' : 'expense';
 
       // 3. ดึงชื่อผู้รับ / รายการ
       let payee = "KBank Transaction";
-      const payeeMatch = text.match(/(?:ไปยังบัญชี|ไปยัง|ให้กับ|ชื่อผู้รับ|จาก|To|From|Merchant)\s*[:]?\s*(.+?)(?:\s{2,}|จำนวน|Amount|Date|วันที่|รหัสอ้างอิง|$)/i);
+      const payeeMatch = text.match(/(?:เพื่อเข้าบัญชีบริษัท|ผู้รับเงิน|ชื่อผู้รับ|ไปยังบัญชี|ไปยัง|ให้กับ|To|From|Merchant)\s*[:：]?\s*(.+?)(?=\s+(?:จำนวนเงิน|ค่าธรรมเนียม|ยอดคงค้าง|วันที่|เลขที่รายการ|รหัสอ้างอิง)|$)/i);
       if (payeeMatch) {
         payee = payeeMatch[1].trim();
       }
+
+      const transactionTimestamp = parseKbankTransactionDate(text, dateStr);
 
       // 4. จัดหมวดหมู่อัตโนมัติ (Smart Categorization)
       let category = 'other';
@@ -473,7 +491,8 @@ app.get('/api/kbank-expenses', async (req, res) => {
 
       transactions.push({
         id: msg.id,
-        date: new Date(dateStr).getTime() || Date.now(),
+        date: transactionTimestamp,
+        transactionTime: transactionTimestamp,
         amount: amount,
         type: transactionType,
         direction: transactionType,
