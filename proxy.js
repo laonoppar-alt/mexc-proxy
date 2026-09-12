@@ -193,6 +193,25 @@ function parseDimeOrderHistory(text, documentInfo) {
   return orders;
 }
 
+async function listAllGmailMessages(query) {
+  const messages = [];
+  let pageToken;
+  const maxMessages = Number(process.env.DIME_MAX_MESSAGES || 2000);
+
+  do {
+    const response = await gmail.users.messages.list({
+      userId: 'me',
+      q: query,
+      maxResults: 100,
+      pageToken
+    });
+    messages.push(...(response.data.messages || []));
+    pageToken = response.data.nextPageToken;
+  } while (pageToken && messages.length < maxMessages);
+
+  return messages.slice(0, maxMessages);
+}
+
 app.use('/api/dime-orders', requirePrivateSync);
 
 app.get('/api/dime-orders', async (req, res) => {
@@ -206,13 +225,9 @@ app.get('/api/dime-orders', async (req, res) => {
   }
 
   try {
-    const response = await gmail.users.messages.list({
-      userId: 'me',
-      q: 'from:no-reply@dime.co.th has:attachment filename:pdf newer_than:90d',
-      maxResults: 100
-    });
-
-    const messages = response.data.messages || [];
+    const afterDate = process.env.DIME_EMAIL_AFTER;
+    const query = `from:no-reply@dime.co.th has:attachment filename:pdf${afterDate ? ` after:${afterDate}` : ''}`;
+    const messages = await listAllGmailMessages(query);
     const orders = [];
     const documents = [];
     const unparsed = [];
