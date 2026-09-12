@@ -17,6 +17,12 @@ const kplusWebhookToken = process.env.KPLUS_WEBHOOK_TOKEN || '';
 // เก็บรายการที่รับจากมือถือไว้ระหว่างที่เซิร์ฟเวอร์ทำงานอยู่
 // ฝั่งหน้าเว็บจะบันทึกซ้ำลง localStorage ของผู้ใช้ จึงไม่ทำให้รายการเดิมถูกเพิ่มซ้ำ
 const kplusWebhookTransactions = new Map();
+const kbankExpensesCache = {
+  expiresAt: 0,
+  data: null,
+  inFlight: null
+};
+const KBANK_EXPENSE_CACHE_MS = 10 * 60 * 1000;
 
 const oauth2Client = new google.auth.OAuth2(
   process.env.GMAIL_CLIENT_ID,
@@ -432,7 +438,13 @@ app.get('/api/kbank-expenses', async (req, res) => {
       return res.json({ success: false, error: 'กรุณาใส่ GMAIL Key ใน Render Environment' });
   }
 
-  try {
+  if (kbankExpensesCache.data && Date.now() < kbankExpensesCache.expiresAt) {
+    return res.json({ ...kbankExpensesCache.data, cached: true });
+  }
+
+  if (!kbankExpensesCache.inFlight) {
+    kbankExpensesCache.inFlight = (async () => {
+      try {
     const response = await gmail.users.messages.list({
       userId: 'me',
       q: '{from:kasikornbank.com from:kbank.co.th from:kplus} newer_than:30d',
@@ -502,11 +514,25 @@ app.get('/api/kbank-expenses', async (req, res) => {
       });
     }
 
-    res.json({ success: true, count: transactions.length, data: transactions });
+        return { success: true, count: transactions.length, data: transactions, syncedAt: Date.now() };
 
+      } catch (error) {
+        console.error('Gmail API Error:', error);
+        throw error;
+      }
+    })();
+  }
+
+  try {
+    const result = await kbankExpensesCache.inFlight;
+    kbankExpensesCache.data = result;
+    kbankExpensesCache.expiresAt = Date.now() + KBANK_EXPENSE_CACHE_MS;
+    return res.json(result);
   } catch (error) {
-    console.error('Gmail API Error:', error);
-    res.status(500).json({ success: false, error: error.message });
+    if (kbankExpensesCache.data) return res.json({ ...kbankExpensesCache.data, cached: true, stale: true });
+    return res.status(500).json({ success: false, error: error.message });
+  } finally {
+    kbankExpensesCache.inFlight = null;
   }
 });
 
