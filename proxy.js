@@ -13,6 +13,8 @@ const allowedOrigins = (process.env.APP_ORIGINS || '')
   .filter(Boolean);
 const privateSyncToken = process.env.DIME_SYNC_TOKEN || '';
 const kplusWebhookToken = process.env.KPLUS_WEBHOOK_TOKEN || '';
+const supabaseUrl = String(process.env.SUPABASE_URL || '').replace(/\/$/, '');
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || '';
 
 // เก็บรายการที่รับจากมือถือไว้ระหว่างที่เซิร์ฟเวอร์ทำงานอยู่
 // ฝั่งหน้าเว็บจะบันทึกซ้ำลง localStorage ของผู้ใช้ จึงไม่ทำให้รายการเดิมถูกเพิ่มซ้ำ
@@ -60,8 +62,73 @@ function setPrivateCors(res, origin) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Dime-Sync-Token, X-KPlus-Webhook-Token, X-Webhook-Token');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   }
+}
+
+function requireSupabaseConfig(res) {
+  if (!supabaseUrl || !supabaseServiceKey) {
+    res.status(500).json({ success: false, error: 'ยังไม่ได้ตั้งค่า SUPABASE_URL หรือ SUPABASE_SERVICE_ROLE_KEY ใน Render' });
+    return false;
+  }
+  return true;
+}
+
+async function supabaseRequest(path, options = {}) {
+  const response = await fetch(`${supabaseUrl}/rest/v1/${path}`, {
+    ...options,
+    headers: {
+      apikey: supabaseServiceKey,
+      Authorization: `Bearer ${supabaseServiceKey}`,
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    }
+  });
+  const text = await response.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = text; }
+  if (!response.ok) {
+    const detail = body?.message || body?.hint || body?.details || body?.error || text || `HTTP ${response.status}`;
+    throw new Error(`Supabase: ${detail}`);
+  }
+  return body;
+}
+
+function transactionRowFromClient(item) {
+  const source = String(item?.source || 'MANUAL').slice(0, 80);
+  const sourceId = String(item?.id || `${source}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`).slice(0, 240);
+  const amount = Number(item?.amount);
+  const timestamp = Number(item?.timestamp);
+  const transactionAt = Number.isFinite(timestamp) && timestamp > 0
+    ? new Date(timestamp).toISOString()
+    : new Date().toISOString();
+  if (!Number.isFinite(amount) || amount <= 0) throw new Error('จำนวนเงินไม่ถูกต้อง');
+  return {
+    source,
+    source_id: sourceId,
+    transaction_type: item?.type === 'income' ? 'income' : 'expense',
+    amount: Math.round(amount * 100) / 100,
+    category: String(item?.cat || item?.category || 'other').slice(0, 80),
+    account_name: String(item?.accountName || item?.payee || '').slice(0, 240) || null,
+    transaction_at: transactionAt,
+    raw_text: String(item?.details || item?.rawText || item?.note || '').slice(0, 1000) || null,
+    updated_at: new Date().toISOString()
+  };
+}
+
+function clientTransactionFromRow(row) {
+  const timestamp = new Date(row.transaction_at).getTime();
+  return {
+    id: row.source_id,
+    source: row.source,
+    type: row.transaction_type === 'income' ? 'income' : 'expense',
+    cat: row.category || 'other',
+    note: row.account_name || (row.transaction_type === 'income' ? 'รายรับ' : 'รายจ่าย'),
+    details: row.raw_text || '',
+    accountName: row.account_name || '',
+    amount: Number(row.amount) || 0,
+    timestamp: Number.isFinite(timestamp) ? timestamp : Date.now()
+  };
 }
 
 function requirePrivateSync(req, res, next) {
@@ -432,6 +499,71 @@ app.get('/api/dime-orders', async (req, res) => {
   }
 });
 
+// ธุรกรรมของผู้ใช้: Supabase เป็นแหล่งข้อมูลหลัก ไม่พึ่ง LocalStorage
+app.use('/api/transactions', requirePrivateSync);
+
+app.get('/api/transactions', async (req, res) => {
+  if (!requireSupabaseConfig(res)) return;
+  try {
+    const rows = await supabaseRequest('transactions?select=*&order=transaction_at.asc');
+    return res.json({
+      success: true,
+      count: Array.isArray(rows) ? rows.length : 0,
+      data: Array.isArray(rows) ? rows.map(clientTransactionFromRow) : [],
+      syncedAt: Date.now()
+    });
+  } catch (error) {
+    console.error('Supabase transaction read error:', error);
+    return res.status(502).json({ success: false, error: error.message });
+  }
+});
+
+app.post('/api/transactions/upsert', async (req, res) => {
+  if (!requireSupabaseConfig(res)) return;
+  const input = Array.isArray(req.body?.transactions) ? req.body.transactions : [];
+  if (input.length > 500) return res.status(400).json({ success: false, error: 'ส่งข้อมูลได้ไม่เกิน 500 รายการต่อครั้ง' });
+  try {
+    const rows = input.map(transactionRowFromClient);
+    if (rows.length) {
+      await supabaseRequest('transactions?on_conflict=source%2Csource_id', {
+        method: 'POST',
+        headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
+        body: JSON.stringify(rows)
+      });
+    }
+    return res.json({ success: true, count: rows.length, syncedAt: Date.now() });
+  } catch (error) {
+    console.error('Supabase transaction upsert error:', error);
+    return res.status(502).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/transactions', async (req, res) => {
+  if (!requireSupabaseConfig(res)) return;
+  const source = String(req.query.source || '').trim();
+  if (!source) return res.status(400).json({ success: false, error: 'ต้องระบุ source' });
+  try {
+    await supabaseRequest(`transactions?source=eq.${encodeURIComponent(source)}`, { method: 'DELETE' });
+    return res.json({ success: true, source });
+  } catch (error) {
+    console.error('Supabase transaction delete error:', error);
+    return res.status(502).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/transactions/:source/:sourceId', async (req, res) => {
+  if (!requireSupabaseConfig(res)) return;
+  try {
+    const source = encodeURIComponent(req.params.source);
+    const sourceId = encodeURIComponent(req.params.sourceId);
+    await supabaseRequest(`transactions?source=eq.${source}&source_id=eq.${sourceId}`, { method: 'DELETE' });
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Supabase transaction delete error:', error);
+    return res.status(502).json({ success: false, error: error.message });
+  }
+});
+
 app.use('/api/kbank-expenses', requirePrivateSync);
 app.get('/api/kbank-expenses', async (req, res) => {
   if (!process.env.GMAIL_REFRESH_TOKEN) {
@@ -445,13 +577,7 @@ app.get('/api/kbank-expenses', async (req, res) => {
   if (!kbankExpensesCache.inFlight) {
     kbankExpensesCache.inFlight = (async () => {
       try {
-    const response = await gmail.users.messages.list({
-      userId: 'me',
-      q: '{from:kasikornbank.com from:kbank.co.th from:kplus} newer_than:30d',
-      maxResults: 20
-    });
-
-    const messages = response.data.messages || [];
+    const messages = await listAllGmailMessages('{from:kasikornbank.com from:kbank.co.th from:kplus} newer_than:30d');
     const transactions = [];
 
     for (const msg of messages) {
