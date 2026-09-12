@@ -416,7 +416,7 @@ app.get('/api/kbank-expenses', async (req, res) => {
   try {
     const response = await gmail.users.messages.list({
       userId: 'me',
-      q: 'from:kasikornbank.com newer_than:30d',
+      q: '{from:kasikornbank.com from:kbank.co.th from:kplus} newer_than:30d',
       maxResults: 20
     });
 
